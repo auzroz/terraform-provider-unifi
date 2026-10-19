@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/apparentlymart/go-cidr/cidr"
+	"github.com/hashicorp/go-version"
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
@@ -57,10 +58,21 @@ func TestAccNetwork_basic(t *testing.T) {
 
 // TestAccNetwork_preservesUnmodeledFields is the issue #201 regression guard: settings that have no
 // schema attribute (set here through the SDK, as the UniFi UI would) must survive an update of an
-// unrelated attribute instead of being reset by the controller's full-replacement PUT.
+// unrelated attribute instead of being reset to zero values by the update request.
 func TestAccNetwork_preservesUnmodeledFields(t *testing.T) {
 	name := acctest.RandomWithPrefix("tfacc")
 	subnet, vlan := pt.GetTestVLAN(t)
+
+	// dhcpdv6_allow_slaac and ipv6_pd_auto_prefixid_enabled only exist from controller 7.5; older
+	// controllers drop the keys, so they are only exercised there. Evaluated lazily because
+	// testClient is only set for acceptance runs.
+	hasIPv6Fields := func() (bool, error) {
+		v, err := version.NewVersion(testClient.Version())
+		if err != nil {
+			return false, err
+		}
+		return !v.LessThan(version.Must(version.NewVersion("7.5"))), nil
+	}
 
 	// setUnmodeled writes the fields the provider does not manage, bypassing Terraform.
 	setUnmodeled := func(s *terraform.State) error {
@@ -68,13 +80,19 @@ func TestAccNetwork_preservesUnmodeledFields(t *testing.T) {
 		if !ok {
 			return errors.New("unifi_network.test not found in state")
 		}
+		ipv6, err := hasIPv6Fields()
+		if err != nil {
+			return err
+		}
 		ctx := context.Background()
 		n, err := testClient.GetNetwork(ctx, rs.Primary.Attributes["site"], rs.Primary.ID)
 		if err != nil {
 			return err
 		}
-		n.DHCPDV6AllowSlaac = true
-		n.IPV6PDAutoPrefixidEnabled = true
+		if ipv6 {
+			n.DHCPDV6AllowSlaac = true
+			n.IPV6PDAutoPrefixidEnabled = true
+		}
 		n.DHCPDNtpEnabled = true
 		n.DHCPDNtp1 = "192.0.2.123"
 		n.IsNAT = true
@@ -88,15 +106,19 @@ func TestAccNetwork_preservesUnmodeledFields(t *testing.T) {
 		if !ok {
 			return errors.New("unifi_network.test not found in state")
 		}
+		ipv6, err := hasIPv6Fields()
+		if err != nil {
+			return err
+		}
 		n, err := testClient.GetNetwork(context.Background(), rs.Primary.Attributes["site"], rs.Primary.ID)
 		if err != nil {
 			return err
 		}
 		var bad []string
-		if !n.DHCPDV6AllowSlaac {
+		if ipv6 && !n.DHCPDV6AllowSlaac {
 			bad = append(bad, "dhcpdv6_allow_slaac")
 		}
-		if !n.IPV6PDAutoPrefixidEnabled {
+		if ipv6 && !n.IPV6PDAutoPrefixidEnabled {
 			bad = append(bad, "ipv6_pd_auto_prefixid_enabled")
 		}
 		if !n.DHCPDNtpEnabled {
