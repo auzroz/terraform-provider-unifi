@@ -2,6 +2,7 @@ package acctest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -49,6 +50,83 @@ func TestAccNetwork_basic(t *testing.T) {
 				ImportState:       true,
 				ImportStateIdFunc: pt.SiteAndIDImportStateIDFunc("unifi_network.test"),
 				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+// TestAccNetwork_preservesUnmodeledFields is the issue #201 regression guard: settings that have no
+// schema attribute (set here through the SDK, as the UniFi UI would) must survive an update of an
+// unrelated attribute instead of being reset by the controller's full-replacement PUT.
+func TestAccNetwork_preservesUnmodeledFields(t *testing.T) {
+	name := acctest.RandomWithPrefix("tfacc")
+	subnet, vlan := pt.GetTestVLAN(t)
+
+	// setUnmodeled writes the fields the provider does not manage, bypassing Terraform.
+	setUnmodeled := func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources["unifi_network.test"]
+		if !ok {
+			return errors.New("unifi_network.test not found in state")
+		}
+		ctx := context.Background()
+		n, err := testClient.GetNetwork(ctx, rs.Primary.Attributes["site"], rs.Primary.ID)
+		if err != nil {
+			return err
+		}
+		n.DHCPDV6AllowSlaac = true
+		n.IPV6PDAutoPrefixidEnabled = true
+		n.DHCPDNtpEnabled = true
+		n.DHCPDNtp1 = "192.0.2.123"
+		n.IsNAT = true
+		_, err = testClient.UpdateNetwork(ctx, rs.Primary.Attributes["site"], n)
+		return err
+	}
+
+	// assertUnmodeled reads the network back from the controller and checks the fields survived.
+	assertUnmodeled := func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources["unifi_network.test"]
+		if !ok {
+			return errors.New("unifi_network.test not found in state")
+		}
+		n, err := testClient.GetNetwork(context.Background(), rs.Primary.Attributes["site"], rs.Primary.ID)
+		if err != nil {
+			return err
+		}
+		var bad []string
+		if !n.DHCPDV6AllowSlaac {
+			bad = append(bad, "dhcpdv6_allow_slaac")
+		}
+		if !n.IPV6PDAutoPrefixidEnabled {
+			bad = append(bad, "ipv6_pd_auto_prefixid_enabled")
+		}
+		if !n.DHCPDNtpEnabled {
+			bad = append(bad, "dhcpd_ntp_enabled")
+		}
+		if n.DHCPDNtp1 != "192.0.2.123" {
+			bad = append(bad, "dhcpd_ntp_1")
+		}
+		if !n.IsNAT {
+			bad = append(bad, "is_nat")
+		}
+		if len(bad) > 0 {
+			return fmt.Errorf("unmodeled fields were reset by update: %v", bad)
+		}
+		return nil
+	}
+
+	AcceptanceTest(t, AcceptanceTestCase{
+		Steps: []resource.TestStep{
+			{
+				Config: testAccNetworkConfig(name, subnet, vlan, true, nil),
+				Check:  setUnmodeled,
+			},
+			{
+				// Change only an unrelated attribute.
+				Config: testAccNetworkConfig(name, subnet, vlan, false, nil),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("unifi_network.test", "igmp_snooping", "false"),
+					assertUnmodeled,
+				),
 			},
 		},
 	})
