@@ -30,6 +30,7 @@ type fakeNetworkClient struct {
 	updateReq *unifi.Network
 }
 
+// UpdateNetwork records the request body in updateReq and returns the canned updateResp/updateErr.
 func (f *fakeNetworkClient) UpdateNetwork(_ context.Context, _ string, n *unifi.Network) (*unifi.Network, error) {
 	f.updateReq = n
 	return f.updateResp, f.updateErr

@@ -1455,6 +1455,9 @@ func resourceNetworkRead(ctx context.Context, d *schema.ResourceData, meta inter
 	return resourceNetworkSetResourceData(resp, d, site)
 }
 
+// resourceNetworkUpdate reads the live network, overlays the schema-managed fields and PUTs the
+// merged object, so settings the schema does not model keep their controller values. A network
+// deleted out-of-band is removed from state.
 func resourceNetworkUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	c, ok := meta.(*base.Client)
 	if !ok {
