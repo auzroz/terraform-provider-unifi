@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/apparentlymart/go-cidr/cidr"
+	"github.com/filipowm/go-unifi/unifi"
 	"github.com/hashicorp/go-version"
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -96,58 +97,70 @@ func TestAccNetwork_preservesUnmodeledFields(t *testing.T) {
 		n.DHCPDNtpEnabled = true
 		n.DHCPDNtp1 = "192.0.2.123"
 		n.IsNAT = true
+		// go-unifi reports a successful-but-empty PUT response as ErrNotFound (issue #98); the
+		// checkUnmodeled that follows confirms whether the write landed.
 		_, err = testClient.UpdateNetwork(ctx, rs.Primary.Attributes["site"], n)
-		return err
-	}
-
-	// assertUnmodeled reads the network back from the controller and checks the fields survived.
-	assertUnmodeled := func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources["unifi_network.test"]
-		if !ok {
-			return errors.New("unifi_network.test not found in state")
-		}
-		ipv6, err := hasIPv6Fields()
-		if err != nil {
+		if err != nil && !errors.Is(err, unifi.ErrNotFound) {
 			return err
-		}
-		n, err := testClient.GetNetwork(context.Background(), rs.Primary.Attributes["site"], rs.Primary.ID)
-		if err != nil {
-			return err
-		}
-		var bad []string
-		if ipv6 && !n.DHCPDV6AllowSlaac {
-			bad = append(bad, "dhcpdv6_allow_slaac")
-		}
-		if ipv6 && !n.IPV6PDAutoPrefixidEnabled {
-			bad = append(bad, "ipv6_pd_auto_prefixid_enabled")
-		}
-		if !n.DHCPDNtpEnabled {
-			bad = append(bad, "dhcpd_ntp_enabled")
-		}
-		if n.DHCPDNtp1 != "192.0.2.123" {
-			bad = append(bad, "dhcpd_ntp_1")
-		}
-		if !n.IsNAT {
-			bad = append(bad, "is_nat")
-		}
-		if len(bad) > 0 {
-			return fmt.Errorf("unmodeled fields were reset by update: %v", bad)
 		}
 		return nil
+	}
+
+	// checkUnmodeled reads the network back from the controller and checks the seeded fields are
+	// still set. failure says what a mismatch means in the step that runs it.
+	checkUnmodeled := func(failure string) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			rs, ok := s.RootModule().Resources["unifi_network.test"]
+			if !ok {
+				return errors.New("unifi_network.test not found in state")
+			}
+			ipv6, err := hasIPv6Fields()
+			if err != nil {
+				return err
+			}
+			n, err := testClient.GetNetwork(context.Background(), rs.Primary.Attributes["site"], rs.Primary.ID)
+			if err != nil {
+				return err
+			}
+			var bad []string
+			if ipv6 && !n.DHCPDV6AllowSlaac {
+				bad = append(bad, "dhcpdv6_allow_slaac")
+			}
+			if ipv6 && !n.IPV6PDAutoPrefixidEnabled {
+				bad = append(bad, "ipv6_pd_auto_prefixid_enabled")
+			}
+			if !n.DHCPDNtpEnabled {
+				bad = append(bad, "dhcpd_ntp_enabled")
+			}
+			if n.DHCPDNtp1 != "192.0.2.123" {
+				bad = append(bad, "dhcpd_ntp_1")
+			}
+			if !n.IsNAT {
+				bad = append(bad, "is_nat")
+			}
+			if len(bad) > 0 {
+				return fmt.Errorf("%s: %v", failure, bad)
+			}
+			return nil
+		}
 	}
 
 	AcceptanceTest(t, AcceptanceTestCase{
 		Steps: []resource.TestStep{
 			{
 				Config: testAccNetworkConfig(name, subnet, vlan, true, nil),
-				Check:  setUnmodeled,
+				// Prove the seed persisted, so a failure in the next step is the update's.
+				Check: resource.ComposeTestCheckFunc(
+					setUnmodeled,
+					checkUnmodeled("controller did not persist the seeded unmodeled fields"),
+				),
 			},
 			{
 				// Change only an unrelated attribute.
 				Config: testAccNetworkConfig(name, subnet, vlan, false, nil),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("unifi_network.test", "igmp_snooping", "false"),
-					assertUnmodeled,
+					checkUnmodeled("unmodeled fields were reset by update"),
 				),
 			},
 		},
